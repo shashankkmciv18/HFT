@@ -113,5 +113,29 @@ double   PriceToPipRatio = 0;
 bool     TradingAllowed = false;
 string   StatusMessage = "";
 
+//+------------------------------------------------------------------+
+//| Time-Based Statistics Tracking                                   |
+//+------------------------------------------------------------------+
+// Trade timestamps array (circular buffer)
+#define MAX_TRADE_HISTORY 500
+datetime TradeTimestamps[];
+double   TradePNLs[];
+int      TradeHistoryCount = 0;
+int      TradeHistoryIndex = 0;
+
+// Order timestamps array (circular buffer)
+#define MAX_ORDER_HISTORY 1000
+datetime OrderPlacedTimestamps[];
+datetime OrderModifiedTimestamps[];
+int      OrderPlacedCount = 0;
+int      OrderModifiedCount = 0;
+int      OrderPlacedIndex = 0;
+int      OrderModifiedIndex = 0;
+
+// Cumulative totals
+int      TotalTradesAllTime = 0;
+int      TotalOrdersPlaced = 0;
+int      TotalOrdersModified = 0;
+
 #endif // HFT_GLOBALS_MQH
 //+------------------------------------------------------------------+
