@@ -9,9 +9,9 @@
 
 
 
-#include <Trade/Trade.mqh>
-#include <Trade/PositionInfo.mqh>
-#include <Trade/OrderInfo.mqh>
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
 
 //--- Global Objects
 CTrade trade;
@@ -58,8 +58,9 @@ input bool   UseDailyLossLimit = true;         // Use Daily Loss Limit
 input double DailyLossPercent = 5.0;           // Daily Loss % Limit
 
 input group "=== SESSION MANAGEMENT ==="
-input int    SessionStartHour = 16;            // Session Start Hour
-input int    SessionEndHour = 17;              // Session End Hour (1 hour max!)
+input bool   shouldUseSessionManagement = false; // Use Session Management
+input int    SessionStartHour = 07;            // Session Start Hour
+input int    SessionEndHour = 10;              // Session End Hour (1 hour max!)
 input int    MaxTradesPerSession = 200;        // Max Trades Warning
 
 input group "=== VWAP FILTER (Optional) ==="
@@ -563,14 +564,133 @@ bool CheckADXFilter()
 }
 
 //+------------------------------------------------------------------+
-//| Session Management                                               |
+//| Check if Date is in US Daylight Saving Time                      |
+//| DST starts: Second Sunday of March at 2:00 AM                    |
+//| DST ends: First Sunday of November at 2:00 AM                    |
+//+------------------------------------------------------------------+
+bool IsNewYorkDST(datetime time)
+{
+   MqlDateTime dt;
+   TimeToStruct(time, dt);
+   
+   int month = dt.mon;
+   int day = dt.day;
+   int dow = dt.day_of_week; // 0 = Sunday
+   int hour = dt.hour;
+   
+   // January, February - No DST
+   if(month < 3) return false;
+   
+   // April to October - DST active
+   if(month > 3 && month < 11) return true;
+   
+   // March - DST starts on second Sunday
+   if(month == 3)
+   {
+      // Find second Sunday: it's between day 8-14
+      int secondSunday = 8 + (7 - ((dow - day % 7 + 7) % 7 + 8 - 1) % 7);
+      // Simplified: calculate which Sunday we're on
+      int firstDayDOW = (dow - (day - 1) % 7 + 7) % 7;
+      secondSunday = (firstDayDOW == 0) ? 8 : (8 + (7 - firstDayDOW));
+      
+      if(day < secondSunday) return false;
+      if(day > secondSunday) return true;
+      // On the second Sunday, DST starts at 2 AM
+      return (hour >= 2);
+   }
+   
+   // November - DST ends on first Sunday
+   if(month == 11)
+   {
+      // Find first Sunday: it's between day 1-7
+      int firstDayDOW = (dow - (day - 1) % 7 + 7) % 7;
+      int firstSunday = (firstDayDOW == 0) ? 1 : (8 - firstDayDOW);
+      
+      if(day < firstSunday) return true;
+      if(day > firstSunday) return false;
+      // On the first Sunday, DST ends at 2 AM
+      return (hour < 2);
+   }
+   
+   // December - No DST
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Get Broker GMT Offset (Auto-Detect)                              |
+//| Returns the broker server's offset from GMT in hours             |
+//+------------------------------------------------------------------+
+int GetBrokerGMTOffset()
+{
+   // Method 1: Use TimeGMT() vs TimeCurrent()
+   // TimeGMT() returns actual GMT time
+   // TimeCurrent() returns broker server time
+   datetime serverTime = TimeCurrent();
+   datetime gmtTime = TimeGMT();
+   
+   // Calculate difference in seconds, then convert to hours
+   int offsetSeconds = (int)(serverTime - gmtTime);
+   int offsetHours = (int)MathRound(offsetSeconds / 3600.0);
+   
+   return offsetHours;
+}
+
+//+------------------------------------------------------------------+
+//| Get New York Hour from Server Time                               |
+//| Auto-detects broker GMT offset                                   |
+//+------------------------------------------------------------------+
+int GetNewYorkHour(datetime serverTime)
+{
+   // Auto-detect broker's GMT offset
+   int brokerGMTOffset = GetBrokerGMTOffset();
+   
+   // New York offset from GMT: -5 (EST) or -4 (EDT)
+   int nyOffsetFromGMT = IsNewYorkDST(serverTime) ? -4 : -5;
+   
+   // Convert server time to New York time
+   MqlDateTime dt;
+   TimeToStruct(serverTime, dt);
+   
+   // Server hour -> GMT hour -> NY hour
+   // GMT hour = Server hour - brokerGMTOffset
+   // NY hour = GMT hour + nyOffsetFromGMT
+   // NY hour = Server hour - brokerGMTOffset + nyOffsetFromGMT
+   int nyHour = dt.hour - brokerGMTOffset + nyOffsetFromGMT;
+   
+   // Handle day wrap
+   if(nyHour < 0) nyHour += 24;
+   if(nyHour >= 24) nyHour -= 24;
+   
+   return nyHour;
+}
+
+//+------------------------------------------------------------------+
+//| Get New York Time (full datetime)                                |
+//+------------------------------------------------------------------+
+datetime GetNewYorkTime()
+{
+   int brokerGMTOffset = GetBrokerGMTOffset();
+   int nyOffsetFromGMT = IsNewYorkDST(TimeCurrent()) ? -4 : -5;
+   
+   // Convert broker time to NY time
+   int totalOffsetSeconds = (nyOffsetFromGMT - brokerGMTOffset) * 3600;
+   
+   return TimeCurrent() + totalOffsetSeconds;
+}
+
+//+------------------------------------------------------------------+
+//| Session Management (New York Time)                               |
 //+------------------------------------------------------------------+
 bool IsSessionActive()
 {
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
+   if(!shouldUseSessionManagement) {
+      return true;
+   }
+
+   // Get current hour in New York time
+   int nyHour = GetNewYorkHour(TimeCurrent());
    
-   if(dt.hour < SessionStartHour || dt.hour >= SessionEndHour)
+   if(nyHour < SessionStartHour || nyHour >= SessionEndHour)
       return false;
    
    // Warn if too many trades
@@ -1019,6 +1139,18 @@ void UpdateChartDisplay()
    display += "═══════════════════════════════════\n";
    display += "    HFT BRACKET PRO - STATUS\n";
    display += "═══════════════════════════════════\n\n";
+   
+   // Broker Info
+   int brokerOffset = GetBrokerGMTOffset();
+   display += StringFormat("Broker GMT: %+d\n", brokerOffset);
+   
+   // New York Time Display
+   int nyHour = GetNewYorkHour(TimeCurrent());
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   string dstStatus = IsNewYorkDST(TimeCurrent()) ? "EDT" : "EST";
+   display += StringFormat("NY Time: %02d:%02d %s\n", nyHour, dt.min, dstStatus);
+   display += StringFormat("Session: %02d:00 - %02d:00 NY\n\n", SessionStartHour, SessionEndHour);
    
    // EA Status
    display += "Status: " + StatusMessage + "\n";
